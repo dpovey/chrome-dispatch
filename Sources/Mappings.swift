@@ -3,7 +3,16 @@ import Foundation
 struct MappingRule: Codable, Hashable, Identifiable {
     var host: String
     var pathPrefix: String?
+    /// Local Chrome profile directory (e.g. "Profile 2"). Cached so legacy
+    /// installs without `userName` keep working, and so resolution is fast
+    /// when the rule was authored on this machine.
     var profile: String
+    /// Google account email associated with the profile. Stable across
+    /// devices: the same account typically lives in different local
+    /// directories on different Macs, so we resolve by email at lookup time.
+    /// Nil for profiles that aren't signed into Google or for rules saved
+    /// before this field existed.
+    var userName: String?
 
     var id: String { "\(host)\(pathPrefix ?? "")" }
 
@@ -96,10 +105,30 @@ struct Mappings: Codable {
         return s == "/" ? nil : s
     }
 
-    func lookup(host: String, path: String) -> String? {
+    /// Resolves a rule to a local profile directory. Prefers `userName`
+    /// (stable across machines) and falls back to the cached `profile`
+    /// directory when no email is recorded or the email isn't signed into
+    /// any local profile. Returns nil when the rule has an email that
+    /// doesn't match any local profile — safer to fall through to the
+    /// picker than to silently route to the cached (and likely wrong)
+    /// directory.
+    static func resolveProfile(for rule: MappingRule, profiles: [ChromeProfile]) -> String? {
+        if let email = rule.userName?.trimmingCharacters(in: .whitespacesAndNewlines), !email.isEmpty {
+            let needle = email.lowercased()
+            if let p = profiles.first(where: { $0.userName.lowercased() == needle }) {
+                return p.directory
+            }
+            return nil
+        }
+        return rule.profile
+    }
+
+    func lookup(host: String, path: String, profiles: [ChromeProfile]) -> String? {
         let key = Self.normalize(host)
         let normalizedPath = path.isEmpty ? "/" : path
-        if let r = bestMatch(host: key, path: normalizedPath) { return r.profile }
+        if let r = bestMatch(host: key, path: normalizedPath) {
+            return Self.resolveProfile(for: r, profiles: profiles)
+        }
         // Parent-domain walk only applies to host-only rules; path prefixes
         // are intentionally tied to the exact host they were saved against.
         var parts = key.split(separator: ".").map(String.init)
@@ -107,7 +136,7 @@ struct Mappings: Codable {
             parts.removeFirst()
             let parent = parts.joined(separator: ".")
             if let r = rules.first(where: { $0.host == parent && ($0.pathPrefix?.isEmpty ?? true) }) {
-                return r.profile
+                return Self.resolveProfile(for: r, profiles: profiles)
             }
         }
         return nil
@@ -137,14 +166,31 @@ struct Mappings: Codable {
         return next == "/"
     }
 
-    mutating func set(host: String, pathPrefix: String?, profile: String) {
+    mutating func set(host: String, pathPrefix: String?, profile: String, userName: String? = nil) {
         let h = Self.normalize(host)
         let p = Self.normalizePathPrefix(pathPrefix)
+        let trimmedEmail = userName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let email = (trimmedEmail?.isEmpty ?? true) ? nil : trimmedEmail
         if let idx = rules.firstIndex(where: { $0.host == h && $0.pathPrefix == p }) {
             rules[idx].profile = profile
+            rules[idx].userName = email
         } else {
-            rules.append(MappingRule(host: h, pathPrefix: p, profile: profile))
+            rules.append(MappingRule(host: h, pathPrefix: p, profile: profile, userName: email))
         }
+    }
+
+    /// Backfill `userName` on legacy rules from the current machine's
+    /// profile list so a future export carries portable identifiers.
+    mutating func backfillUserNames(profiles: [ChromeProfile]) -> Bool {
+        var changed = false
+        for i in rules.indices where rules[i].userName?.isEmpty ?? true {
+            if let p = profiles.first(where: { $0.directory == rules[i].profile }),
+               !p.userName.isEmpty {
+                rules[i].userName = p.userName
+                changed = true
+            }
+        }
+        return changed
     }
 
     mutating func remove(host: String, pathPrefix: String?) {

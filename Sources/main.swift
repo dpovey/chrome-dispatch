@@ -74,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let path = url.path
-        if !optionDown, let profile = Mappings.load().lookup(host: host, path: path) {
+        if !optionDown, let profile = Mappings.load().lookup(host: host, path: path, profiles: ChromeProfiles.load()) {
             launchChrome(profileDir: profile, url: urlString)
             return
         }
@@ -94,7 +94,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let sel = selection {
                 if sel.remember, !host.isEmpty {
                     var m = Mappings.load()
-                    m.set(host: host, pathPrefix: sel.pathPrefix, profile: sel.profile.directory)
+                    m.set(host: host,
+                          pathPrefix: sel.pathPrefix,
+                          profile: sel.profile.directory,
+                          userName: sel.profile.userName)
                     m.save()
                 }
                 self.launchChrome(profileDir: sel.profile.directory, url: url)

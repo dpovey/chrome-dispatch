@@ -24,6 +24,7 @@ struct MappingsView: View {
         var host: String
         var pathPrefix: String?
         var profile: String
+        var userName: String?
 
         var displayKey: String {
             if let p = pathPrefix, !p.isEmpty { return host + p }
@@ -124,6 +125,19 @@ struct MappingsView: View {
                     Image(systemName: "plus")
                 }
                 .help("Add mapping")
+                Button {
+                    exportMappings()
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .help("Export mappings to a file")
+                .disabled(entries.isEmpty)
+                Button {
+                    importMappings()
+                } label: {
+                    Image(systemName: "square.and.arrow.down")
+                }
+                .help("Import mappings from a file (merges with existing)")
             }
 
             if entries.isEmpty {
@@ -228,10 +242,13 @@ struct MappingsView: View {
             ) { host, pathPrefix, profile in
                 let normalizedHost = Mappings.normalize(host)
                 let normalizedPath = Mappings.normalizePathPrefix(pathPrefix)
+                let email = profiles.first(where: { $0.directory == profile })?.userName
+                let userName = (email?.isEmpty ?? true) ? nil : email
                 if let idx = entries.firstIndex(where: { $0.host == normalizedHost && $0.pathPrefix == normalizedPath }) {
                     entries[idx].profile = profile
+                    entries[idx].userName = userName
                 } else {
-                    entries.append(Entry(host: normalizedHost, pathPrefix: normalizedPath, profile: profile))
+                    entries.append(Entry(host: normalizedHost, pathPrefix: normalizedPath, profile: profile, userName: userName))
                 }
                 persist()
                 showingAdd = false
@@ -256,6 +273,10 @@ struct MappingsView: View {
             set: { newValue in
                 if let idx = entries.firstIndex(where: { $0.id == entry.id }) {
                     entries[idx].profile = newValue
+                    // Keep the cross-device email in sync with the chosen profile;
+                    // empty for unsigned profiles.
+                    let email = profiles.first(where: { $0.directory == newValue })?.userName
+                    entries[idx].userName = (email?.isEmpty ?? true) ? nil : email
                     persist()
                 }
             }
@@ -263,19 +284,86 @@ struct MappingsView: View {
     }
 
     private func reload() {
-        let m = Mappings.load()
+        var m = Mappings.load()
+        // Legacy installs only stored directory names; backfill emails from the
+        // current machine so the next export carries portable identifiers.
+        if m.backfillUserNames(profiles: profiles) {
+            _ = m.save()
+        }
         entries = m.rules
-            .map { Entry(host: $0.host, pathPrefix: $0.pathPrefix, profile: $0.profile) }
+            .map { Entry(host: $0.host, pathPrefix: $0.pathPrefix, profile: $0.profile, userName: $0.userName) }
             .sorted { $0.displayKey < $1.displayKey }
     }
 
     private func persist() {
         var m = Mappings()
-        m.rules = entries.map { MappingRule(host: $0.host, pathPrefix: $0.pathPrefix, profile: $0.profile) }
+        m.rules = entries.map {
+            MappingRule(host: $0.host, pathPrefix: $0.pathPrefix, profile: $0.profile, userName: $0.userName)
+        }
         if !m.save() {
             status = "Couldn't save mappings — see Console for details."
         } else if status.hasPrefix("Couldn't save") {
             status = ""
+        }
+    }
+
+    private func exportMappings() {
+        let panel = NSSavePanel()
+        panel.title = "Export Chrome Dispatch Mappings"
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "chrome-dispatch-mappings.json"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        var m = Mappings()
+        m.rules = entries.map {
+            MappingRule(host: $0.host, pathPrefix: $0.pathPrefix, profile: $0.profile, userName: $0.userName)
+        }
+        do {
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try enc.encode(m).write(to: dest, options: .atomic)
+            status = "Exported \(entries.count) mapping\(entries.count == 1 ? "" : "s")."
+        } catch {
+            status = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func importMappings() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Chrome Dispatch Mappings"
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let src = panel.url else { return }
+        do {
+            let data = try Data(contentsOf: src)
+            let imported = try JSONDecoder().decode(Mappings.self, from: data)
+            var current = Mappings()
+            current.rules = entries.map {
+                MappingRule(host: $0.host, pathPrefix: $0.pathPrefix, profile: $0.profile, userName: $0.userName)
+            }
+            // Imported rules with the same host+pathPrefix overwrite local ones;
+            // others are appended. Profile resolution happens at lookup time, so
+            // imports for accounts not signed in here will fall through to the
+            // picker until the user adopts a local profile for them.
+            var added = 0, updated = 0
+            for r in imported.rules {
+                if let idx = current.rules.firstIndex(where: { $0.host == r.host && $0.pathPrefix == r.pathPrefix }) {
+                    current.rules[idx] = r
+                    updated += 1
+                } else {
+                    current.rules.append(r)
+                    added += 1
+                }
+            }
+            if !current.save() {
+                status = "Couldn't save imported mappings — see Console for details."
+                return
+            }
+            reload()
+            status = "Imported: \(added) new, \(updated) updated."
+        } catch {
+            status = "Import failed: \(error.localizedDescription)"
         }
     }
 
