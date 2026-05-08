@@ -24,6 +24,7 @@ swiftc -O \
     Sources/ProfileAvatar.swift \
     Sources/PickerView.swift \
     Sources/MappingsView.swift \
+    Sources/Updater.swift \
     -o "$APP_BUNDLE/Contents/MacOS/$EXEC_NAME"
 
 # Strip any provenance/quarantine markers, then ad-hoc sign so LaunchServices

@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
+        scheduleStartupUpdateCheck()
     }
 
     /// Re-launching via Spotlight or Finder while we're already running: open
@@ -192,12 +193,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 keyEquivalent: "")
         manage.target = self
         menu.addItem(manage)
+        let updates = NSMenuItem(title: "Check for Updates…",
+                                 action: #selector(checkForUpdatesManual),
+                                 keyEquivalent: "")
+        updates.target = self
+        menu.addItem(updates)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit Chrome Dispatch",
                                 action: #selector(NSApplication.terminate(_:)),
                                 keyEquivalent: "q"))
         item.menu = menu
         statusItem = item
+    }
+
+    /// Throttled silent check fired ~5s after launch. Honours a 24-hour
+    /// gate stored in UserDefaults so cold-launches via link clicks don't
+    /// hammer the GitHub API.
+    private func scheduleStartupUpdateCheck() {
+        let key = "lastUpdateCheckAt"
+        let now = Date()
+        if let last = UserDefaults.standard.object(forKey: key) as? Date,
+           now.timeIntervalSince(last) < 24 * 60 * 60 {
+            return
+        }
+        UserDefaults.standard.set(now, forKey: key)
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            await self?.runUpdateCheck(silent: true)
+        }
+    }
+
+    @objc private func checkForUpdatesManual() {
+        Task { [weak self] in await self?.runUpdateCheck(silent: false) }
+    }
+
+    private func runUpdateCheck(silent: Bool) async {
+        if let info = await Updater.checkForUpdate() {
+            await MainActor.run { self.presentUpdateAvailable(info) }
+        } else if !silent {
+            await MainActor.run { self.presentUpToDate() }
+        }
+    }
+
+    private func presentUpdateAvailable(_ info: UpdateInfo) {
+        let alert = NSAlert()
+        alert.messageText = "Chrome Dispatch \(info.version) is available"
+        alert.informativeText = "You're running \(Updater.currentVersion()). Open the release page to download the new DMG."
+        alert.addButton(withTitle: "View Release…")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(info.releaseURL)
+        }
+    }
+
+    private func presentUpToDate() {
+        let alert = NSAlert()
+        alert.messageText = "You're up to date"
+        alert.informativeText = "Chrome Dispatch \(Updater.currentVersion()) is the latest version."
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 }
 
